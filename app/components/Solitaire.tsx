@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   RANKS,
   SUITS,
@@ -23,12 +23,14 @@ function CardView({
   style,
   onClick,
   onDoubleClick,
+  onPointerDown,
 }: {
   card: Card;
   selected?: boolean;
   style?: React.CSSProperties;
   onClick?: () => void;
   onDoubleClick?: () => void;
+  onPointerDown?: (e: React.PointerEvent) => void;
 }) {
   const base =
     "absolute left-0 w-full aspect-[5/7] rounded-md border shadow select-none cursor-pointer";
@@ -49,9 +51,10 @@ function CardView({
       className={`${base} bg-white ${isRed(card.suit) ? "text-red-600" : "text-zinc-900"} ${
         selected ? "border-yellow-400 ring-4 ring-yellow-400" : "border-zinc-400"
       }`}
-      style={style}
+      style={{ ...style, touchAction: "none" }}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
+      onPointerDown={onPointerDown}
     >
       <div className="absolute left-1 top-0.5 text-xs font-bold leading-tight sm:text-base">
         {RANKS[card.rank]}
@@ -64,9 +67,20 @@ function CardView({
   );
 }
 
-function Slot({ label, onClick, children }: { label?: string; onClick?: () => void; children?: React.ReactNode }) {
+function Slot({
+  label,
+  drop,
+  onClick,
+  children,
+}: {
+  label?: string;
+  drop?: string;
+  onClick?: () => void;
+  children?: React.ReactNode;
+}) {
   return (
     <div
+      data-drop={drop}
       className="relative aspect-[5/7] w-full rounded-md border-2 border-dashed border-white/30"
       onClick={onClick}
     >
@@ -83,6 +97,8 @@ export default function Solitaire() {
   const [history, setHistory] = useState<GameState[]>([]);
   const [sel, setSel] = useState<Source | null>(null);
   const [seconds, setSeconds] = useState(0);
+  const [drag, setDrag] = useState<{ src: Source; cards: Card[]; x: number; y: number; w: number } | null>(null);
+  const suppressClick = useRef(false);
 
   const won = game ? isWon(game) : false;
 
@@ -128,6 +144,7 @@ export default function Solitaire() {
     (a.kind !== "tableau" || a.index === (b as { index: number }).index);
 
   const clickCard = (src: Source, card: Card, dst: Target) => {
+    if (suppressClick.current) return;
     if (sel && !sameSel(sel, src) && canMove(game, sel, dst)) return apply(move(game, sel, dst));
     if (!card.up) {
       setSel(null);
@@ -140,6 +157,48 @@ export default function Solitaire() {
     if (sel && canMove(game, sel, dst)) apply(move(game, sel, dst));
     else setSel(null);
   };
+
+  const startDrag = (e: React.PointerEvent, src: Source, cards: Card[]) => {
+    if (e.button !== 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const offX = sx - rect.left;
+    const offY = sy - rect.top;
+    const w = rect.width;
+    let started = false;
+    const onMove = (ev: PointerEvent) => {
+      if (!started) {
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 6) return;
+        started = true;
+      }
+      setDrag({ src, cards, x: ev.clientX - offX, y: ev.clientY - offY, w });
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      if (!started) return;
+      suppressClick.current = true;
+      setTimeout(() => (suppressClick.current = false), 0);
+      setDrag(null);
+      const id = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-drop]")?.getAttribute("data-drop");
+      if (!id) return;
+      const [k, n] = id.split(":");
+      const dst: Target = k === "f" ? { kind: "foundation", pile: +n } : { kind: "tableau", pile: +n };
+      apply(move(game, src, dst));
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
+  const isDragged = (src: Source) =>
+    !!drag &&
+    drag.src.kind === src.kind &&
+    (src.kind === "waste" ||
+      ((drag.src as { pile: number }).pile === (src as { pile: number }).pile &&
+        (src.kind !== "tableau" || (drag.src as { index: number }).index <= src.index)));
 
   const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
   const ss = String(seconds % 60).padStart(2, "0");
@@ -181,6 +240,8 @@ export default function Solitaire() {
             <CardView
               card={game.waste.at(-1)!}
               selected={isSel({ kind: "waste" })}
+              style={isDragged({ kind: "waste" }) ? { visibility: "hidden" } : undefined}
+              onPointerDown={(e) => startDrag(e, { kind: "waste" }, [game.waste.at(-1)!])}
               onClick={() => clickCard({ kind: "waste" }, game.waste.at(-1)!, { kind: "foundation", pile: 0 })}
               onDoubleClick={() => apply(autoFoundation(game, { kind: "waste" }))}
             />
@@ -193,11 +254,13 @@ export default function Solitaire() {
           const top = pile.at(-1);
           const src: Source = { kind: "foundation", pile: p };
           return (
-            <Slot key={suit} label={suit} onClick={() => clickPile({ kind: "foundation", pile: p })}>
+            <Slot key={suit} label={suit} drop={`f:${p}`} onClick={() => clickPile({ kind: "foundation", pile: p })}>
               {top && (
                 <CardView
                   card={top}
                   selected={isSel(src)}
+                  style={isDragged(src) ? { visibility: "hidden" } : undefined}
+                  onPointerDown={(e) => startDrag(e, src, [top])}
                   onClick={() => clickCard(src, top, { kind: "foundation", pile: p })}
                 />
               )}
@@ -209,7 +272,7 @@ export default function Solitaire() {
       {/* Tableau */}
       <div className="grid grid-cols-7 items-start gap-1.5 sm:gap-3">
         {game.tableau.map((col, p) => (
-          <div key={p} className="relative">
+          <div key={p} className="relative" data-drop={`t:${p}`}>
             <Slot label={col.length ? undefined : "K"} onClick={() => clickPile({ kind: "tableau", pile: p })} />
             {col.map((card, i) => {
               const src: Source = { kind: "tableau", pile: p, index: i };
@@ -219,7 +282,11 @@ export default function Solitaire() {
                   key={card.id}
                   card={card}
                   selected={selTableau(p, i)}
-                  style={{ top: `calc(${i} * var(--step))` }}
+                  style={{
+                    top: `calc(${i} * var(--step))`,
+                    ...(isDragged(src) ? { visibility: "hidden" as const } : {}),
+                  }}
+                  onPointerDown={(e) => startDrag(e, src, col.slice(i))}
                   onClick={() => clickCard(src, card, dst)}
                   onDoubleClick={() => i === col.length - 1 && apply(autoFoundation(game, src))}
                 />
@@ -230,6 +297,14 @@ export default function Solitaire() {
           </div>
         ))}
       </div>
+
+      {drag && (
+        <div className="pointer-events-none fixed z-40" style={{ left: drag.x, top: drag.y, width: drag.w }}>
+          {drag.cards.map((c, i) => (
+            <CardView key={c.id} card={c} style={{ top: `calc(${i} * var(--step))` }} />
+          ))}
+        </div>
+      )}
 
       {won && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
